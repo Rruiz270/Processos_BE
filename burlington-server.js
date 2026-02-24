@@ -22,10 +22,16 @@ const app = express();
 const PORT = 3100;
 
 // === FILES ===
+const IS_VERCEL = process.env.VERCEL === '1';
 const DATA_FILE = path.join(__dirname, 'burlington_processos_data.json');
 const API_KEY = 'cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==';
 const DELAY_MS = 500;
 const COMUNICA_CACHE_FILE = path.join(__dirname, 'burlington_comunicacoes_cache.json');
+
+// Safe write (no-op on Vercel serverless - read-only filesystem)
+function safeWriteFile(filePath, data) {
+  try { fs.writeFileSync(filePath, data, 'utf-8'); } catch(e) { console.log('[FS] Write skipped (read-only):', e.message); }
+}
 
 // === COMUNICA PJE API (REAL-TIME) ===
 function queryComunicaPJe(numeroLimpo) {
@@ -181,7 +187,7 @@ async function runComunicaUpdate(source = 'manual') {
     if (i < processos.length - 1) await sleep(3200); // ~18 req/min to be safe
   }
 
-  fs.writeFileSync(COMUNICA_CACHE_FILE, JSON.stringify(cache, null, 2), 'utf-8');
+  safeWriteFile(COMUNICA_CACHE_FILE, JSON.stringify(cache, null, 2));
   console.log('[COMUNICA] Concluido: ' + found + '/' + total + ' com comunicacoes');
   return { found, total, timestamp: new Date().toISOString() };
 }
@@ -386,7 +392,7 @@ async function runUpdate(source = 'manual') {
 
     // Backup
     const backupFile = DATA_FILE.replace('.json', `_backup_${new Date().toISOString().substring(0, 10)}.json`);
-    fs.writeFileSync(backupFile, rawData);
+    safeWriteFile(backupFile, rawData);
     logMsg(`Backup: ${path.basename(backupFile)}`);
 
     let found = 0, notFound = 0, errors = 0, updated = 0;
@@ -462,7 +468,7 @@ async function runUpdate(source = 'manual') {
     data.metadata.ultima_atualizacao_datajud = new Date().toISOString();
     data.metadata.processos_encontrados_datajud = found;
     data.metadata.processos_nao_encontrados_datajud = notFound;
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    safeWriteFile(DATA_FILE, JSON.stringify(data, null, 2));
 
     const reportFile = path.join(__dirname, `relatorio_atualizacao_${new Date().toISOString().substring(0, 10)}.json`);
     const report = {
@@ -471,7 +477,7 @@ async function runUpdate(source = 'manual') {
       resumo: { total_processos: processos.length, encontrados: found, nao_encontrados: notFound, erros: errors, atualizados_com_novas_movimentacoes: updated },
       detalhes: changes
     };
-    fs.writeFileSync(reportFile, JSON.stringify(report, null, 2), 'utf-8');
+    safeWriteFile(reportFile, JSON.stringify(report, null, 2));
 
     const result = {
       success: true,
@@ -2119,49 +2125,52 @@ window.addEventListener('scroll', () => { document.getElementById('btt').classLi
 </html>`;
 }
 
-// === CRON SCHEDULE ===
-// DataJud: Daily at 07:00 and 19:00
-cron.schedule('0 7 * * *', () => {
-  console.log('[CRON] DataJud 07:00 iniciada');
-  runUpdate('cron-07h');
-});
-cron.schedule('0 19 * * *', () => {
-  console.log('[CRON] DataJud 19:00 iniciada');
-  runUpdate('cron-19h');
-});
+// === CRON SCHEDULE (local only - Vercel uses serverless, no persistent process) ===
+if (!IS_VERCEL) {
+  cron.schedule('0 7 * * *', () => {
+    console.log('[CRON] DataJud 07:00 iniciada');
+    runUpdate('cron-07h');
+  });
+  cron.schedule('0 19 * * *', () => {
+    console.log('[CRON] DataJud 19:00 iniciada');
+    runUpdate('cron-19h');
+  });
+  cron.schedule('0 6 * * *', () => {
+    console.log('[CRON] Comunica PJe 06:00 iniciada');
+    runComunicaUpdate('cron-06h');
+  });
+  cron.schedule('0 10 * * *', () => {
+    console.log('[CRON] Comunica PJe 10:00 iniciada');
+    runComunicaUpdate('cron-10h');
+  });
+  cron.schedule('0 14 * * *', () => {
+    console.log('[CRON] Comunica PJe 14:00 iniciada');
+    runComunicaUpdate('cron-14h');
+  });
+  cron.schedule('0 18 * * *', () => {
+    console.log('[CRON] Comunica PJe 18:00 iniciada');
+    runComunicaUpdate('cron-18h');
+  });
+  console.log('[CRON] DataJud: 07h e 19h | Comunica PJe: 06h, 10h, 14h, 18h');
+}
 
-// Comunica PJe: 4x ao dia (06:00, 10:00, 14:00, 18:00) - tempo real
-cron.schedule('0 6 * * *', () => {
-  console.log('[CRON] Comunica PJe 06:00 iniciada');
-  runComunicaUpdate('cron-06h');
-});
-cron.schedule('0 10 * * *', () => {
-  console.log('[CRON] Comunica PJe 10:00 iniciada');
-  runComunicaUpdate('cron-10h');
-});
-cron.schedule('0 14 * * *', () => {
-  console.log('[CRON] Comunica PJe 14:00 iniciada');
-  runComunicaUpdate('cron-14h');
-});
-cron.schedule('0 18 * * *', () => {
-  console.log('[CRON] Comunica PJe 18:00 iniciada');
-  runComunicaUpdate('cron-18h');
-});
+// === START SERVER (local only) ===
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`\n=========================================================`);
+    console.log(`  BURLINGTON LEGAL - Dashboard + API`);
+    console.log(`  http://localhost:${PORT}`);
+    console.log(`=========================================================`);
+    console.log(`  Endpoints:`);
+    console.log(`    GET  /           -> Dashboard`);
+    console.log(`    GET  /api/status -> Status dos processos`);
+    console.log(`    POST /api/atualizar -> Iniciar atualização`);
+    console.log(`    GET  /api/progress -> Progresso da atualização`);
+    console.log(`    GET  /api/processos -> Dados completos`);
+    console.log(`  Cron: 07:00 e 19:00 diariamente`);
+    console.log(`=========================================================\n`);
+  });
+}
 
-console.log('[CRON] DataJud: 07h e 19h | Comunica PJe: 06h, 10h, 14h, 18h');
-
-// === START SERVER ===
-app.listen(PORT, () => {
-  console.log(`\n=========================================================`);
-  console.log(`  BURLINGTON LEGAL - Dashboard + API`);
-  console.log(`  http://localhost:${PORT}`);
-  console.log(`=========================================================`);
-  console.log(`  Endpoints:`);
-  console.log(`    GET  /           -> Dashboard`);
-  console.log(`    GET  /api/status -> Status dos processos`);
-  console.log(`    POST /api/atualizar -> Iniciar atualização`);
-  console.log(`    GET  /api/progress -> Progresso da atualização`);
-  console.log(`    GET  /api/processos -> Dados completos`);
-  console.log(`  Cron: 07:00 e 19:00 diariamente`);
-  console.log(`=========================================================\n`);
-});
+// Export for Vercel serverless
+module.exports = app;
