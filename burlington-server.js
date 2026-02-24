@@ -839,6 +839,124 @@ app.get('/api/comunicacoes/:id', async (req, res) => {
   }
 });
 
+// Processo FULL - busca tudo em tempo real (DataJud + Comunica PJe)
+app.get('/api/processo/:id/full', async (req, res) => {
+  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+  const p = data.processos.find(x => x.id === Number(req.params.id));
+  if (!p) return res.json({ error: 'Processo nao encontrado' });
+
+  const num = (p.numero || '').replace(/[^0-9]/g, '');
+  const tribunal = (p.tribunal || 'TRT-2').toLowerCase().replace('-','');
+
+  // Fetch DataJud (ALL movements - size 20 to get max)
+  const datajudPromise = new Promise((resolve) => {
+    const body = JSON.stringify({ query: { match: { numeroProcesso: num } }, size: 20 });
+    const options = {
+      hostname: 'api-publica.datajud.cnj.jus.br',
+      path: '/api_publica_' + tribunal + '/_search',
+      method: 'POST',
+      headers: { 'Authorization': 'ApiKey ' + API_KEY, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 30000
+    };
+    const req2 = https.request(options, (r) => {
+      let d = ''; r.on('data', c => d += c);
+      r.on('end', () => {
+        try {
+          const j = JSON.parse(d);
+          if (r.statusCode !== 200) { resolve({ movimentos: [], assuntos: [], partes: [] }); return; }
+          const hits = j.hits?.hits || [];
+          let movs = [], assuntos = [], partes = [], sentencas = [];
+          let grauInfo = {};
+          hits.forEach(hit => {
+            const src = hit._source;
+            grauInfo[src.grau || 'G1'] = {
+              classe: src.classe?.nome, orgao: src.orgaoJulgador?.nome,
+              sistema: src.sistemaProcessual?.nome, formato: src.formato?.nome,
+              dataAjuizamento: src.dataAjuizamento, nivelSigilo: src.nivelSigilo
+            };
+            (src.movimentos || []).forEach(m => {
+              const comps = (m.complementosTabelados || []).map(c => ({ nome: c.nome, valor: c.valor, descricao: c.descricao }));
+              const isSentenca = m.nome && (m.nome.toLowerCase().includes('senten') || m.nome.toLowerCase().includes('acordao') || m.nome.toLowerCase().includes('despacho') || m.nome.toLowerCase().includes('decisão') || m.nome.toLowerCase().includes('decisao'));
+              movs.push({
+                data: formatDate(m.dataHora), dataHora: m.dataHora, nome: m.nome, codigo: m.codigo,
+                grau: src.grau, orgao: src.orgaoJulgador?.nome, complementos: comps, isSentenca
+              });
+            });
+            (src.assuntos || []).forEach(a => { if (!assuntos.find(x => x.codigo === a.codigo)) assuntos.push({ nome: a.nome, codigo: a.codigo }); });
+            (src.partes || []).forEach(pt => { if (!partes.find(x => x.nome === pt.nome)) partes.push({ nome: pt.nome, tipo: pt.tipo, advogados: (pt.advogados||[]).map(a => a.nome) }); });
+          });
+          movs.sort((a, b) => (b.dataHora || '').localeCompare(a.dataHora || ''));
+          resolve({ movimentos: movs, assuntos, partes, grauInfo });
+        } catch(e) { resolve({ movimentos: [], assuntos: [], partes: [] }); }
+      });
+    });
+    req2.on('error', () => resolve({ movimentos: [], assuntos: [], partes: [] }));
+    req2.on('timeout', () => { req2.destroy(); resolve({ movimentos: [], assuntos: [], partes: [] }); });
+    req2.write(body); req2.end();
+  });
+
+  // Also try TST if applicable
+  const tstPromise = (p.grau && p.grau.includes('TST')) || (p.tipo && p.tipo.includes('AIRR')) ? new Promise((resolve) => {
+    const body = JSON.stringify({ query: { match: { numeroProcesso: num } }, size: 5 });
+    const options = {
+      hostname: 'api-publica.datajud.cnj.jus.br', path: '/api_publica_tst/_search', method: 'POST',
+      headers: { 'Authorization': 'ApiKey ' + API_KEY, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 15000
+    };
+    const req2 = https.request(options, (r) => {
+      let d = ''; r.on('data', c => d += c);
+      r.on('end', () => {
+        try {
+          const j = JSON.parse(d);
+          const hits = j.hits?.hits || [];
+          let movs = [];
+          hits.forEach(hit => {
+            (hit._source.movimentos || []).forEach(m => {
+              movs.push({ data: formatDate(m.dataHora), dataHora: m.dataHora, nome: m.nome, codigo: m.codigo, grau: 'TST', orgao: hit._source.orgaoJulgador?.nome, complementos: (m.complementosTabelados||[]).map(c=>({nome:c.nome,valor:c.valor,descricao:c.descricao})) });
+            });
+          });
+          resolve(movs);
+        } catch(e) { resolve([]); }
+      });
+    });
+    req2.on('error', () => resolve([]));
+    req2.on('timeout', () => { req2.destroy(); resolve([]); });
+    req2.write(body); req2.end();
+  }) : Promise.resolve([]);
+
+  // Fetch ALL comunicacoes
+  const comunicaPromise = queryComunicaPJe(num);
+
+  // Wait for all
+  const [datajud, tstMovs, comunica] = await Promise.all([datajudPromise, tstPromise, comunicaPromise]);
+
+  // Merge TST movimentos
+  if (tstMovs.length > 0) {
+    datajud.movimentos = [...datajud.movimentos, ...tstMovs].sort((a,b) => (b.dataHora||'').localeCompare(a.dataHora||''));
+  }
+
+  // Parse comunicacoes
+  const comunicacoes = comunica.success ? comunica.items.map(it => ({
+    id: it.id, data: it.data_disponibilizacao, tipo: it.tipoComunicacao,
+    orgao: it.nomeOrgao, tribunal: it.siglaTribunal, link: it.link,
+    destinatarios: (it.destinatarios||[]).map(d => d.nome),
+    parsed: parseIntimacao(it.texto),
+    texto_completo: it.texto
+  })) : [];
+
+  res.json({
+    ...p,
+    full: true,
+    datajud_movimentos_all: datajud.movimentos,
+    datajud_assuntos: datajud.assuntos,
+    datajud_partes: datajud.partes,
+    datajud_grau_info: datajud.grauInfo,
+    comunicacoes_all: comunicacoes,
+    comunica_total: comunica.success ? comunica.count : (p.comunica_total || 0),
+    fetched_at: new Date().toISOString()
+  });
+});
+
 // Atualizar comunicacoes de todos
 app.post('/api/comunicacoes/atualizar', async (req, res) => {
   res.json({ started: true, message: 'Atualizacao Comunica PJe iniciada (demora ~4 min para 64 processos)' });
@@ -878,7 +996,34 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0d111
 .modal-hdr .badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .modal-close{background:#21262d;border:1px solid #30363d;color:#8b949e;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:.85rem;transition:all .15s}
 .modal-close:hover{background:#f85149;color:#fff;border-color:#f85149}
+.btn-full{background:linear-gradient(135deg,#238636,#2ea043);border:1px solid #3fb950;color:#fff;padding:8px 18px;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:700;transition:all .2s;display:inline-flex;align-items:center;gap:6px}
+.btn-full:hover{background:linear-gradient(135deg,#2ea043,#3fb950);transform:translateY(-1px);box-shadow:0 4px 12px rgba(63,185,80,.3)}
+.btn-full.loading{opacity:.7;pointer-events:none}
 .modal-body{padding:24px 28px;max-height:75vh;overflow-y:auto}
+
+/* Full view */
+.full-section{margin-bottom:20px;border:1px solid #30363d;border-radius:12px;overflow:hidden}
+.full-section-hdr{background:#1c2333;padding:12px 18px;font-size:.88rem;font-weight:700;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.full-section-hdr:hover{background:#242d40}
+.full-section-body{padding:16px 18px;max-height:500px;overflow-y:auto}
+.full-mov{padding:10px 14px;border-bottom:1px solid #21262d;display:grid;grid-template-columns:100px 1fr;gap:12px;font-size:.82rem;transition:background .15s}
+.full-mov:hover{background:rgba(88,166,255,.04)}
+.full-mov:last-child{border-bottom:none}
+.full-mov-date{color:#58a6ff;font-weight:600;white-space:nowrap}
+.full-mov-desc{color:#e6edf3}
+.full-mov-comp{color:#8b949e;font-size:.76rem;margin-top:3px}
+.full-mov-grau{display:inline-block;background:rgba(188,140,255,.1);color:#d2a8ff;padding:1px 8px;border-radius:4px;font-size:.7rem;margin-left:6px}
+.full-mov.sentenca{border-left:3px solid #f85149;background:rgba(248,81,73,.04)}
+.full-mov.sentenca .full-mov-desc{color:#f85149;font-weight:600}
+.full-intim{padding:14px 18px;border-bottom:1px solid #21262d;font-size:.82rem}
+.full-intim:last-child{border-bottom:none}
+.full-intim-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px}
+.full-intim-texto{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:12px;font-size:.78rem;color:#8b949e;line-height:1.7;max-height:200px;overflow-y:auto;white-space:pre-wrap;margin-top:8px}
+.full-parte{padding:8px 14px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;align-items:center;font-size:.82rem}
+.full-parte:last-child{border-bottom:none}
+.full-filter{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.full-filter button{background:#21262d;border:1px solid #30363d;color:#8b949e;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:.75rem;transition:all .15s}
+.full-filter button:hover,.full-filter button.active{background:rgba(88,166,255,.15);color:#58a6ff;border-color:rgba(88,166,255,.3)}
 
 /* Modal sections */
 .m-section{margin-bottom:20px}
@@ -1765,6 +1910,7 @@ async function openModal(id) {
   h += '<div><h2>#' + p.id + ' - ' + esc(p.reclamante) + '</h2>';
   h += '<div style="font-size:.8rem;color:#8b949e;margin-top:4px">' + esc(p.numero) + ' | ' + esc(p.vara) + '</div></div>';
   h += '<div class="badges">' + riskBg(p.risco) + ' ' + priorBg(p.prioridade);
+  h += ' <button class="btn-full" onclick="openFullProcess(' + p.id + ')" id="btnFull' + p.id + '">&#128269; Processo Full</button>';
   h += ' <button class="modal-close" onclick="closeModal()">&#10005; Fechar</button></div>';
   h += '</div>';
 
@@ -1963,6 +2109,175 @@ async function openModal(id) {
   document.getElementById('modalContent').innerHTML = h;
 }
 
+// === PROCESSO FULL ===
+async function openFullProcess(id) {
+  const btn = document.getElementById('btnFull' + id);
+  if (btn) { btn.classList.add('loading'); btn.innerHTML = '&#9203; Buscando DataJud + PJe...'; }
+
+  try {
+    const res = await fetch('/api/processo/' + id + '/full');
+    const p = await res.json();
+    if (p.error) { alert('Erro: ' + p.error); return; }
+
+    const fmt = v => v ? 'R$ ' + Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2}) : 'N/A';
+    const yn = v => v ? '<span style="color:#f85149;font-weight:700">SIM</span>' : '<span style="color:#3fb950">Nao</span>';
+    let h = '';
+
+    // HEADER
+    h += '<div class="modal-hdr" style="background:linear-gradient(135deg,#1a3a1a,#0d1117);border-bottom:2px solid #3fb950">';
+    h += '<div><h2 style="color:#3fb950">&#128269; #' + p.id + ' - ' + esc(p.reclamante) + ' (PROCESSO FULL)</h2>';
+    h += '<div style="font-size:.8rem;color:#8b949e;margin-top:4px">' + esc(p.numero) + ' | ' + esc(p.vara) + '</div>';
+    h += '<div style="font-size:.72rem;color:#3fb950;margin-top:4px">Dados em tempo real: DataJud + Comunica PJe | Buscado: ' + new Date(p.fetched_at).toLocaleString('pt-BR') + '</div></div>';
+    h += '<div class="badges">' + riskBg(p.risco) + ' ' + priorBg(p.prioridade);
+    h += ' <button class="btn-full" onclick="openModal(' + p.id + ')">&#8592; Voltar Resumo</button>';
+    h += ' <button class="modal-close" onclick="closeModal()">&#10005; Fechar</button></div>';
+    h += '</div>';
+
+    h += '<div class="modal-body">';
+
+    // PARTES DO PROCESSO
+    if (p.datajud_partes && p.datajud_partes.length) {
+      h += '<div class="full-section"><div class="full-section-hdr" onclick="toggleNext(this)">';
+      h += '<span style="color:#bc8cff">&#128101; Partes do Processo (' + p.datajud_partes.length + ')</span><span style="color:#484f58">&#9660;</span></div>';
+      h += '<div class="full-section-body">';
+      p.datajud_partes.forEach(pt => {
+        const isRecl = (pt.tipo||'').toUpperCase().includes('AUTOR') || (pt.tipo||'').toUpperCase().includes('RECLAMAN');
+        const isReu = (pt.tipo||'').toUpperCase().includes('REU') || (pt.tipo||'').toUpperCase().includes('RECLAMA');
+        const color = isRecl ? '#f85149' : (isReu ? '#d29922' : '#8b949e');
+        h += '<div class="full-parte"><div><span style="color:'+color+';font-weight:600">' + esc(pt.nome) + '</span>';
+        h += ' <span style="color:#484f58;font-size:.75rem">(' + esc(pt.tipo||'') + ')</span></div>';
+        if (pt.advogados && pt.advogados.length) h += '<div style="font-size:.75rem;color:#8b949e">Adv: ' + pt.advogados.map(a => esc(a)).join(', ') + '</div>';
+        h += '</div>';
+      });
+      h += '</div></div>';
+    }
+
+    // ASSUNTOS
+    if (p.datajud_assuntos && p.datajud_assuntos.length) {
+      h += '<div class="full-section"><div class="full-section-hdr">';
+      h += '<span style="color:#d29922">&#128220; Assuntos</span></div>';
+      h += '<div class="full-section-body" style="display:flex;flex-wrap:wrap;gap:8px">';
+      p.datajud_assuntos.forEach(a => {
+        h += '<span style="background:rgba(210,153,34,.1);color:#d29922;padding:6px 14px;border-radius:8px;font-size:.8rem;border:1px solid rgba(210,153,34,.2)">' + esc(a.nome) + ' <span style="color:#484f58">('+a.codigo+')</span></span>';
+      });
+      h += '</div></div>';
+    }
+
+    // VALORES
+    h += '<div class="full-section"><div class="full-section-hdr"><span style="color:#3fb950">&#128176; Valores</span></div>';
+    h += '<div class="full-section-body"><div class="m-grid">';
+    h += '<div class="m-field"><div class="lbl">Valor da Causa</div><div class="val val-big val-orange">' + fmt(p.valor_causa) + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Valor Condenacao</div><div class="val val-big val-red">' + fmt(p.valor_condenacao) + '</div></div>';
+    if (p.valor_acordo) h += '<div class="m-field"><div class="lbl">Valor Acordo</div><div class="val val-big val-green">' + fmt(p.valor_acordo) + '</div></div>';
+    if (p.valor_bloqueado) h += '<div class="m-field"><div class="lbl">Valor Bloqueado</div><div class="val val-big val-red">' + fmt(p.valor_bloqueado) + '</div></div>';
+    if (p.valor_liquido_execucao) h += '<div class="m-field"><div class="lbl">Valor Liq. Execucao</div><div class="val val-big val-red">' + fmt(p.valor_liquido_execucao) + '</div></div>';
+    h += '</div></div></div>';
+
+    // ALL MOVIMENTACOES DATAJUD (com filtro)
+    const movs = p.datajud_movimentos_all || [];
+    const sentencas = movs.filter(m => m.isSentenca || (m.nome||'').toLowerCase().match(/senten|acordao|decisão|decisao|despacho|julgamento/));
+    h += '<div class="full-section"><div class="full-section-hdr" onclick="toggleNext(this)">';
+    h += '<span style="color:#58a6ff">&#128752; TODAS as Movimentacoes DataJud (' + movs.length + ')</span><span style="color:#484f58">&#9660;</span></div>';
+    h += '<div class="full-section-body" style="padding:0">';
+
+    // Filtros
+    h += '<div class="full-filter" style="padding:12px 18px 0">';
+    h += '<button class="active" onclick="filterMovs(\\'all\\',this)">Todas (' + movs.length + ')</button>';
+    h += '<button onclick="filterMovs(\\'sentenca\\',this)">Sentencas/Decisoes (' + sentencas.length + ')</button>';
+    const graus = [...new Set(movs.map(m => m.grau).filter(Boolean))];
+    graus.forEach(g => {
+      const ct = movs.filter(m => m.grau === g).length;
+      h += '<button onclick="filterMovs(\\''+g+'\\',this)">' + esc(g) + ' (' + ct + ')</button>';
+    });
+    h += '</div>';
+
+    h += '<div id="movsContainer">';
+    movs.forEach((m, i) => {
+      const isSent = m.isSentenca || (m.nome||'').toLowerCase().match(/senten|acordao|decisão|decisao|julgamento/);
+      h += '<div class="full-mov' + (isSent ? ' sentenca' : '') + '" data-grau="' + esc(m.grau||'') + '" data-sent="' + (isSent?'1':'0') + '">';
+      h += '<div class="full-mov-date">' + esc(m.data||'') + (m.grau ? '<span class="full-mov-grau">' + esc(m.grau) + '</span>' : '') + '</div>';
+      h += '<div><div class="full-mov-desc">' + esc(m.nome||'') + '</div>';
+      if (m.complementos && m.complementos.length) {
+        h += '<div class="full-mov-comp">';
+        m.complementos.forEach(c => { h += esc((c.valor||c.descricao||c.nome||'')) + ' '; });
+        h += '</div>';
+      }
+      if (m.orgao) h += '<div class="full-mov-comp">' + esc(m.orgao) + '</div>';
+      h += '</div></div>';
+    });
+    h += '</div></div></div>';
+
+    // ALL INTIMACOES COM TEXTO COMPLETO
+    const comms = p.comunicacoes_all || [];
+    h += '<div class="full-section"><div class="full-section-hdr" onclick="toggleNext(this)">';
+    h += '<span style="color:#f0883e">&#9889; TODAS as Intimacoes PJe (' + comms.length + ') - TEXTO COMPLETO</span><span style="color:#484f58">&#9660;</span></div>';
+    h += '<div class="full-section-body" style="padding:0">';
+    if (comms.length === 0) {
+      h += '<div style="padding:20px;text-align:center;color:#484f58">Nenhuma comunicacao encontrada no Comunica PJe</div>';
+    }
+    comms.forEach((c, i) => {
+      const isUrgent = c.parsed?.urgente;
+      h += '<div class="full-intim" style="' + (isUrgent ? 'border-left:3px solid #f85149;background:rgba(248,81,73,.04)' : '') + '">';
+      h += '<div class="full-intim-hdr">';
+      h += '<div><span style="color:#58a6ff;font-weight:700">' + esc(c.data||'') + '</span>';
+      h += ' <span style="color:#8b949e">' + esc(c.tipo||'') + '</span>';
+      h += ' <span style="color:#bc8cff;font-size:.75rem">' + esc(c.orgao||'') + '</span>';
+      if (c.parsed?.tipo_decisao) h += ' <span class="acao-badge acao-' + (isUrgent?'vermelho':'azul') + '">' + esc(c.parsed.tipo_decisao) + '</span>';
+      if (c.parsed?.prazo_dias) h += ' <span class="acao-badge acao-laranja">Prazo: ' + c.parsed.prazo_dias + 'd</span>';
+      h += '</div>';
+      if (c.link) h += '<a href="' + esc(c.link) + '" target="_blank" style="color:#58a6ff;font-size:.78rem;text-decoration:none;background:rgba(88,166,255,.1);padding:4px 10px;border-radius:6px">Ver no PJe</a>';
+      h += '</div>';
+      if (c.destinatarios?.length) h += '<div style="font-size:.72rem;color:#484f58;margin-bottom:6px">Para: ' + c.destinatarios.map(d => esc(d)).join(', ') + '</div>';
+      // Texto completo com toggle
+      if (c.texto_completo) {
+        h += '<div style="margin-top:6px"><button onclick="toggleText(this)" style="background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);color:#58a6ff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:.75rem">&#9660; Ver texto completo</button>';
+        h += '<div class="full-intim-texto" style="display:none">' + esc(c.texto_completo) + '</div></div>';
+      } else if (c.parsed?.conteudo_resumido) {
+        h += '<div style="font-size:.78rem;color:#8b949e;margin-top:4px">' + esc(c.parsed.conteudo_resumido) + '</div>';
+      }
+      h += '</div>';
+    });
+    h += '</div></div>';
+
+    // DADOS DO PROCESSO
+    h += '<div class="full-section"><div class="full-section-hdr" onclick="toggleNext(this)">';
+    h += '<span style="color:#8b949e">&#128196; Dados Cadastrais</span><span style="color:#484f58">&#9660;</span></div>';
+    h += '<div class="full-section-body"><div class="m-grid">';
+    h += '<div class="m-field"><div class="lbl">Tipo</div><div class="val">' + esc(p.tipo||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Grau</div><div class="val">' + esc(p.grau||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Tribunal</div><div class="val">' + esc(p.tribunal||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Vara</div><div class="val">' + esc(p.vara||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Cidade</div><div class="val">' + esc(p.cidade||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Autuacao</div><div class="val">' + esc(p.data_autuacao||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Status</div><div class="val">' + esc(p.status||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Fase</div><div class="val">' + esc(p.fase||'') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Resultado Burlington</div><div class="val">' + esc(p.resultado_burlington||'Pendente') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Resultado FRRamos</div><div class="val">' + esc(p.resultado_frramos||'N/A') + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Desc. PJ Burlington</div><div class="val">' + yn(p.desconsideracao_pj_burlington) + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Desc. PJ FRRamos</div><div class="val">' + yn(p.desconsideracao_pj_frramos) + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Burlington Revel</div><div class="val">' + yn(p.burlington_revel) + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Bloqueio PJ</div><div class="val">' + yn(p.pedido_bloqueio_conta_pj) + '</div></div>';
+    h += '<div class="m-field"><div class="lbl">Penhora Veiculo</div><div class="val">' + yn(p.pedido_automovel) + '</div></div>';
+    h += '</div></div></div>';
+
+    h += '</div>'; // modal-body
+    document.getElementById('modalContent').innerHTML = h;
+  } catch(e) {
+    alert('Erro ao buscar processo full: ' + e.message);
+    if (btn) { btn.classList.remove('loading'); btn.innerHTML = '&#128269; Processo Full'; }
+  }
+}
+
+function filterMovs(type, el) {
+  document.querySelectorAll('.full-filter button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('#movsContainer .full-mov').forEach(m => {
+    if (type === 'all') { m.style.display = ''; }
+    else if (type === 'sentenca') { m.style.display = m.dataset.sent === '1' ? '' : 'none'; }
+    else { m.style.display = m.dataset.grau === type ? '' : 'none'; }
+  });
+}
+
 function closeModal() {
   document.getElementById('modalOverlay').classList.remove('show');
   document.body.style.overflow = '';
@@ -2116,6 +2431,10 @@ function priorBg(p) {
   if (pl.includes('med')) return '<span class="bg bg-y">' + esc(p) + '</span>';
   return '<span class="bg bg-g">' + esc(p) + '</span>';
 }
+
+// Helpers
+function toggleNext(el) { var s = el.nextElementSibling.style; s.display = s.display === 'none' ? '' : 'none'; }
+function toggleText(btn) { var t = btn.nextElementSibling; if (t.style.display === 'none') { t.style.display = ''; btn.innerHTML = '&#9650; Ocultar texto'; } else { t.style.display = 'none'; btn.innerHTML = '&#9660; Ver texto completo'; } }
 
 // Scroll
 function goTo(id) { document.getElementById(id)?.scrollIntoView({behavior:'smooth',block:'start'}); }
