@@ -1,0 +1,17 @@
+{
+  "name": "processos-be",
+  "version": "1.0.0",
+  "description": "Burlington English - Dashboard de Processos Trabalhistas",
+  "main": "burlington-server.js",
+  "scripts": {
+    "start": "node burlington-server.js",
+    "dev": "node burlington-server.js"
+  },
+  "keywords": ["legal", "processos", "trabalhista", "dashboard"],
+  "author": "Raphael Ruiz",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "node-cron": "^4.2.1"
+  }
+}
