@@ -60,12 +60,13 @@ function queryComunicaPJe(numeroLimpo) {
 
 // Parse intimation text to extract key info
 function parseIntimacao(texto) {
-  const info = { tipo_decisao: '', prazo_dias: null, prazo_descricao: '', conteudo_resumido: '', urgente: false };
+  const info = { tipo_decisao: '', prazo_dias: null, prazo_descricao: '', conteudo_resumido: '', urgente: false, requerimentos_reclamante: [], decisao_sobre_pedido: '' };
   if (!texto) return info;
   const t = texto.toUpperCase();
+  const limpo = texto.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
   // Detect decision types and extract deadlines
-  if (t.includes('DESCONSIDERAÇÃO DA PERSONALIDADE')) {
+  if (t.includes('DESCONSIDERAÇÃO DA PERSONALIDADE') || t.includes('DESCONSIDERACAO DA PERSONALIDADE')) {
     info.tipo_decisao = 'INCIDENTE DESCONSIDERACAO PJ';
     info.urgente = true;
     info.prazo_dias = 15;
@@ -109,8 +110,32 @@ function parseIntimacao(texto) {
   if (t.includes('FERNANDA')) info.conteudo_resumido += '[MENCIONA FERNANDA] ';
   if (t.includes('BRASSPLATE')) info.conteudo_resumido += '[MENCIONA BRASSPLATE] ';
 
+  // === EXTRACT PETITIONS/REQUESTS from claimant's lawyers ===
+  // Pattern: "Defiro/Indefiro o pedido de...", "requer...", "pleiteia...", "solicita..."
+  const reqs = [];
+  const patterns = [
+    /(?:exequente|reclamante|autor)[\s\S]{0,80}?(?:requer(?:eu)?|pleitei?a|solicito?a|pede|pediu|postula)[\s\S]{0,200}/gi,
+    /(?:defiro|indefiro|defere-se|indefere-se|concedo|nego|acolho|rejeito)[\s\S]{0,300}/gi,
+    /(?:pedido de|requerimento de|solicitação de|petição de)[\s\S]{0,200}/gi,
+    /(?:ID [a-f0-9]+)[\s:]*(?:defiro|indefiro|cite-se|intime-se|expeça-se)[\s\S]{0,200}/gi
+  ];
+  patterns.forEach(rx => {
+    let m;
+    while ((m = rx.exec(limpo)) !== null) {
+      const snippet = m[0].replace(/\s+/g, ' ').trim().substring(0, 250);
+      if (!reqs.includes(snippet)) reqs.push(snippet);
+    }
+  });
+  info.requerimentos_reclamante = reqs.slice(0, 5);
+
+  // Extract specific decision about petition (what judge decided)
+  const decMatch = limpo.match(/(?:DESPACHO|DECISÃO|DECISAO)[\s\S]{0,1000}/i);
+  if (decMatch) {
+    info.decisao_sobre_pedido = decMatch[0].replace(/\s+/g, ' ').trim().substring(0, 600);
+  }
+
   // Summarize first 300 chars
-  info.conteudo_resumido += texto.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 300);
+  info.conteudo_resumido += limpo.substring(0, 300);
 
   return info;
 }
@@ -953,6 +978,160 @@ app.get('/api/processo/:id/full', async (req, res) => {
     datajud_grau_info: datajud.grauInfo,
     comunicacoes_all: comunicacoes,
     comunica_total: comunica.success ? comunica.count : (p.comunica_total || 0),
+    fetched_at: new Date().toISOString()
+  });
+});
+
+// === PETICOES E DOCUMENTOS - Timeline completa ===
+app.get('/api/processo/:id/peticoes', async (req, res) => {
+  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+  const p = data.processos.find(x => x.id === Number(req.params.id));
+  if (!p) return res.json({ error: 'Processo nao encontrado' });
+
+  const num = (p.numero || '').replace(/[^0-9]/g, '');
+  const tribunal = (p.tribunal || 'TRT-2').toLowerCase().replace('-','');
+
+  // Fetch DataJud movements
+  const datajudResult = await queryDataJud(num, tribunal);
+  const movs = datajudResult.found ? (datajudResult.movimentosRecentes || []) : [];
+
+  // Fetch all comunica PJe
+  const comunica = await queryComunicaPJe(num);
+
+  // Build unified timeline
+  const timeline = [];
+
+  // 1. DataJud movements - identify petitions and decisions
+  if (datajudResult.found) {
+    // Re-query with full data for all movements
+    const fullBody = JSON.stringify({ query: { match: { numeroProcesso: num } }, size: 20 });
+    const fullMovs = await new Promise((resolve) => {
+      const opts = {
+        hostname: 'api-publica.datajud.cnj.jus.br',
+        path: '/api_publica_' + tribunal + '/_search',
+        method: 'POST',
+        headers: { 'Authorization': 'ApiKey ' + API_KEY, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(fullBody) },
+        timeout: 30000
+      };
+      const r = https.request(opts, (resp) => {
+        let d = ''; resp.on('data', c => d += c);
+        resp.on('end', () => {
+          try {
+            const hits = JSON.parse(d).hits?.hits || [];
+            let all = [];
+            hits.forEach(h => {
+              (h._source.movimentos || []).forEach(m => {
+                const comps = (m.complementosTabelados || []).map(c => ({ nome: c.nome, valor: c.valor, descricao: c.descricao }));
+                all.push({ data: formatDate(m.dataHora), dataHora: m.dataHora, nome: m.nome, codigo: m.codigo, grau: h._source.grau, complementos: comps });
+              });
+            });
+            all.sort((a, b) => (b.dataHora || '').localeCompare(a.dataHora || ''));
+            resolve(all);
+          } catch(e) { resolve([]); }
+        });
+      });
+      r.on('error', () => resolve([]));
+      r.on('timeout', () => { r.destroy(); resolve([]); });
+      r.write(fullBody); r.end();
+    });
+
+    fullMovs.forEach(m => {
+      const nome = (m.nome || '').toLowerCase();
+      const compsText = (m.complementos || []).map(c => c.valor || c.descricao || c.nome || '').filter(Boolean).join(', ');
+      let tipo = 'movimento';
+      let autor = 'tribunal';
+      let relevancia = 'baixa';
+
+      if (nome.includes('petição') || nome.includes('peticao')) {
+        tipo = 'peticao';
+        autor = 'reclamante';
+        relevancia = 'alta';
+      } else if (nome.includes('contestação') || nome.includes('contestacao') || nome.includes('defesa')) {
+        tipo = 'peticao';
+        autor = 'reclamado';
+        relevancia = 'alta';
+      } else if (nome.includes('recurso') || nome.includes('agravo') || nome.includes('embargo')) {
+        tipo = 'recurso';
+        relevancia = 'alta';
+        // Determine who filed based on complementos
+        if (compsText.toLowerCase().includes('reclamante') || compsText.toLowerCase().includes('exequente')) autor = 'reclamante';
+        else if (compsText.toLowerCase().includes('reclamado')) autor = 'reclamado';
+      } else if (nome.includes('sentença') || nome.includes('sentenca') || nome.includes('acórdão') || nome.includes('acordao')) {
+        tipo = 'decisao';
+        relevancia = 'critica';
+      } else if (nome.includes('despacho') || nome.includes('decisão') || nome.includes('decisao')) {
+        tipo = 'decisao';
+        relevancia = 'media';
+      } else if (nome.includes('juntada')) {
+        tipo = 'documento';
+        relevancia = 'media';
+      } else if (nome.includes('mandado') || nome.includes('penhora') || nome.includes('bloqueio')) {
+        tipo = 'constricao';
+        relevancia = 'critica';
+        autor = 'tribunal';
+      }
+
+      timeline.push({
+        fonte: 'DataJud',
+        data: m.data,
+        dataHora: m.dataHora,
+        tipo,
+        autor,
+        relevancia,
+        titulo: m.nome,
+        detalhes: compsText,
+        grau: m.grau
+      });
+    });
+  }
+
+  // 2. Comunica PJe - full text intimations
+  if (comunica.success) {
+    comunica.items.forEach(it => {
+      const parsed = parseIntimacao(it.texto);
+      const limpo = (it.texto || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      const dest = (it.destinatarios || []).map(d => d.nome);
+
+      timeline.push({
+        fonte: 'ComunicaPJe',
+        data: it.data_disponibilizacao,
+        dataHora: it.data_disponibilizacao + 'T00:00:00',
+        tipo: parsed.tipo_decisao ? 'decisao' : 'intimacao',
+        autor: 'tribunal',
+        relevancia: parsed.urgente ? 'critica' : 'media',
+        titulo: (parsed.tipo_decisao || it.tipoComunicacao || 'Intimacao') + ' - ' + (it.nomeOrgao || ''),
+        detalhes: parsed.decisao_sobre_pedido || parsed.conteudo_resumido,
+        texto_completo: limpo,
+        link: it.link,
+        destinatarios: dest,
+        requerimentos_identificados: parsed.requerimentos_reclamante
+      });
+    });
+  }
+
+  // Sort unified timeline by date desc
+  timeline.sort((a, b) => (b.dataHora || '').localeCompare(a.dataHora || ''));
+
+  // Separate peticoes from reclamante
+  const peticoesReclamante = timeline.filter(t => t.autor === 'reclamante');
+  const decisoes = timeline.filter(t => t.tipo === 'decisao' || t.relevancia === 'critica');
+  const constricoes = timeline.filter(t => t.tipo === 'constricao');
+
+  res.json({
+    processo_id: p.id,
+    reclamante: p.reclamante,
+    numero: p.numero,
+    advogado_reclamante: p.advogado_reclamante,
+    total_eventos: timeline.length,
+    peticoes_reclamante: peticoesReclamante.length,
+    decisoes_judiciais: decisoes.length,
+    constricoes: constricoes.length,
+    timeline,
+    resumo: {
+      ultimas_peticoes: peticoesReclamante.slice(0, 10),
+      ultimas_decisoes: decisoes.slice(0, 10),
+      constricoes_recentes: constricoes.slice(0, 5)
+    },
     fetched_at: new Date().toISOString()
   });
 });
@@ -1917,6 +2096,7 @@ async function openModal(id) {
   h += '<div style="font-size:.8rem;color:#8b949e;margin-top:4px">' + esc(p.numero) + ' | ' + esc(p.vara) + '</div></div>';
   h += '<div class="badges">' + riskBg(p.risco) + ' ' + priorBg(p.prioridade);
   h += ' <button class="btn-full" onclick="openFullProcess(' + p.id + ')" id="btnFull' + p.id + '">&#128269; Processo Full</button>';
+  h += ' <button class="btn-full" style="background:linear-gradient(135deg,#8b5cf6,#7c3aed)" onclick="openPeticoes(' + p.id + ')" id="btnPet' + p.id + '">&#128220; Peticoes</button>';
   h += ' <button class="modal-close" onclick="closeModal()">&#10005; Fechar</button></div>';
   h += '</div>';
 
@@ -2281,6 +2461,144 @@ function filterMovs(type, el) {
     if (type === 'all') { m.style.display = ''; }
     else if (type === 'sentenca') { m.style.display = m.dataset.sent === '1' ? '' : 'none'; }
     else { m.style.display = m.dataset.grau === type ? '' : 'none'; }
+  });
+}
+
+// === PETICOES VIEW ===
+async function openPeticoes(id) {
+  var btn = document.getElementById('btnPet' + id);
+  if (btn) { btn.classList.add('loading'); btn.innerHTML = '&#9203; Buscando peticoes...'; }
+
+  document.getElementById('modalContent').innerHTML = '<div style="padding:60px;text-align:center;color:#8b949e"><div style="font-size:2rem;margin-bottom:12px">&#128220;</div>Buscando peticoes e documentos do processo #' + id + ' em tempo real...<br><small>DataJud + Comunica PJe</small></div>';
+  document.getElementById('modalOverlay').classList.add('show');
+  document.body.style.overflow = 'hidden';
+
+  try {
+    var res = await fetch('/api/processo/' + id + '/peticoes');
+    var d = await res.json();
+    if (d.error) { alert(d.error); closeModal(); return; }
+
+    var h = '';
+    // Header
+    h += '<div class="modal-hdr" style="background:linear-gradient(135deg,#2d1b4e,#0d1117);border-bottom:2px solid #8b5cf6">';
+    h += '<div><h2 style="color:#d2a8ff">&#128220; #' + d.processo_id + ' - ' + esc(d.reclamante) + '</h2>';
+    h += '<div style="font-size:.8rem;color:#8b949e;margin-top:4px">' + esc(d.numero) + ' | Adv. Reclamante: ' + esc(String(d.advogado_reclamante || 'N/A')) + '</div>';
+    h += '<div style="font-size:.72rem;color:#a78bfa;margin-top:4px">' + d.total_eventos + ' eventos | ' + d.peticoes_reclamante + ' peticoes reclamante | ' + d.decisoes_judiciais + ' decisoes | ' + d.constricoes + ' constricoes</div></div>';
+    h += '<div class="badges"><button class="btn-full" onclick="openModal(' + id + ')">&#8592; Resumo</button>';
+    h += ' <button class="btn-full" onclick="openFullProcess(' + id + ')">&#128269; Full</button>';
+    h += ' <button class="modal-close" onclick="closeModal()">&#10005;</button></div></div>';
+
+    h += '<div class="modal-body">';
+
+    // STATS BAR
+    h += '<div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">';
+    h += '<div style="flex:1;min-width:140px;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.3);border-radius:10px;padding:14px;text-align:center"><div style="font-size:1.5rem;font-weight:700;color:#a78bfa">' + d.peticoes_reclamante + '</div><div style="font-size:.75rem;color:#8b949e">Peticoes do Reclamante</div></div>';
+    h += '<div style="flex:1;min-width:140px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.3);border-radius:10px;padding:14px;text-align:center"><div style="font-size:1.5rem;font-weight:700;color:#58a6ff">' + d.decisoes_judiciais + '</div><div style="font-size:.75rem;color:#8b949e">Decisoes Judiciais</div></div>';
+    h += '<div style="flex:1;min-width:140px;background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:10px;padding:14px;text-align:center"><div style="font-size:1.5rem;font-weight:700;color:#f85149">' + d.constricoes + '</div><div style="font-size:.75rem;color:#8b949e">Constricoes</div></div>';
+    h += '<div style="flex:1;min-width:140px;background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.3);border-radius:10px;padding:14px;text-align:center"><div style="font-size:1.5rem;font-weight:700;color:#3fb950">' + d.total_eventos + '</div><div style="font-size:.75rem;color:#8b949e">Total Eventos</div></div>';
+    h += '</div>';
+
+    // PETICOES DO RECLAMANTE (HIGHLIGHT)
+    if (d.resumo.ultimas_peticoes.length > 0) {
+      h += '<div class="full-section" style="border-color:rgba(139,92,246,.3)"><div class="full-section-hdr" style="background:#1e1533">';
+      h += '<span style="color:#a78bfa">&#128220; PETICOES DO RECLAMANTE (' + d.resumo.ultimas_peticoes.length + ') - O que os advogados do reclamante pediram</span></div>';
+      h += '<div class="full-section-body" style="padding:0">';
+      d.resumo.ultimas_peticoes.forEach(function(ev) {
+        h += '<div class="full-mov" style="border-left:3px solid #8b5cf6;background:rgba(139,92,246,.04)">';
+        h += '<div class="full-mov-date">' + esc(ev.data) + (ev.grau ? '<span class="full-mov-grau">' + esc(ev.grau) + '</span>' : '') + '</div>';
+        h += '<div><div class="full-mov-desc" style="color:#d2a8ff">' + esc(ev.titulo) + '</div>';
+        if (ev.detalhes) h += '<div class="full-mov-comp">' + esc(ev.detalhes) + '</div>';
+        h += '<div style="margin-top:4px"><span style="background:rgba(139,92,246,.15);color:#a78bfa;padding:2px 8px;border-radius:4px;font-size:.7rem">PETICAO RECLAMANTE</span></div>';
+        h += '</div></div>';
+      });
+      h += '</div></div>';
+    }
+
+    // DECISOES JUDICIAIS
+    if (d.resumo.ultimas_decisoes.length > 0) {
+      h += '<div class="full-section" style="border-color:rgba(88,166,255,.3)"><div class="full-section-hdr" onclick="toggleNext(this)" style="background:#132036">';
+      h += '<span style="color:#58a6ff">&#9878; DECISOES JUDICIAIS (' + d.resumo.ultimas_decisoes.length + ') - O que o juiz decidiu</span><span style="color:#484f58">&#9660;</span></div>';
+      h += '<div class="full-section-body" style="padding:0">';
+      d.resumo.ultimas_decisoes.forEach(function(ev) {
+        var isCrit = ev.relevancia === 'critica';
+        h += '<div class="full-mov' + (isCrit ? ' sentenca' : '') + '">';
+        h += '<div class="full-mov-date">' + esc(ev.data) + (ev.grau ? '<span class="full-mov-grau">' + esc(ev.grau) + '</span>' : '') + '</div>';
+        h += '<div><div class="full-mov-desc">' + esc(ev.titulo) + '</div>';
+        if (ev.detalhes) h += '<div class="full-mov-comp" style="max-height:150px;overflow-y:auto">' + esc(ev.detalhes.substring(0, 500)) + '</div>';
+        if (ev.requerimentos_identificados && ev.requerimentos_identificados.length > 0) {
+          h += '<div style="margin-top:8px;padding:8px 12px;background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.2);border-radius:8px">';
+          h += '<div style="font-size:.72rem;color:#a78bfa;font-weight:700;margin-bottom:4px">REQUERIMENTOS IDENTIFICADOS NO TEXTO:</div>';
+          ev.requerimentos_identificados.forEach(function(r) {
+            h += '<div style="font-size:.78rem;color:#d2a8ff;margin-bottom:4px;padding-left:8px;border-left:2px solid #7c3aed">• ' + esc(r) + '</div>';
+          });
+          h += '</div>';
+        }
+        if (ev.texto_completo) {
+          h += '<div style="margin-top:6px"><button onclick="toggleText(this)" style="background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);color:#58a6ff;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:.72rem">&#9660; Ver texto completo</button>';
+          h += '<div class="full-intim-texto" style="display:none">' + esc(ev.texto_completo) + '</div></div>';
+        }
+        if (ev.link) h += '<div style="margin-top:4px"><a href="' + esc(ev.link) + '" target="_blank" style="color:#58a6ff;font-size:.72rem">&#128279; Ver no PJe</a></div>';
+        h += '</div></div>';
+      });
+      h += '</div></div>';
+    }
+
+    // CONSTRICOES
+    if (d.resumo.constricoes_recentes.length > 0) {
+      h += '<div class="full-section" style="border-color:rgba(248,81,73,.3)"><div class="full-section-hdr" onclick="toggleNext(this)" style="background:#1f1315">';
+      h += '<span style="color:#f85149">&#128274; CONSTRICOES PATRIMONIAIS (' + d.resumo.constricoes_recentes.length + ')</span><span style="color:#484f58">&#9660;</span></div>';
+      h += '<div class="full-section-body" style="padding:0">';
+      d.resumo.constricoes_recentes.forEach(function(ev) {
+        h += '<div class="full-mov sentenca">';
+        h += '<div class="full-mov-date">' + esc(ev.data) + '</div>';
+        h += '<div><div class="full-mov-desc">' + esc(ev.titulo) + '</div>';
+        if (ev.detalhes) h += '<div class="full-mov-comp">' + esc(ev.detalhes) + '</div>';
+        h += '</div></div>';
+      });
+      h += '</div></div>';
+    }
+
+    // TIMELINE COMPLETA (collapsible)
+    h += '<div class="full-section"><div class="full-section-hdr" onclick="toggleNext(this)">';
+    h += '<span style="color:#8b949e">&#128197; TIMELINE COMPLETA (' + d.timeline.length + ' eventos)</span><span style="color:#484f58">&#9660;</span></div>';
+    h += '<div class="full-section-body" style="padding:0;display:none;max-height:600px;overflow-y:auto">';
+
+    // Filter bar
+    h += '<div class="full-filter" style="padding:12px 18px 0">';
+    h += '<button class="active" onclick="filterPet(this,\\'all\\')">Todos</button>';
+    h += '<button onclick="filterPet(this,\\'peticao\\')">Peticoes</button>';
+    h += '<button onclick="filterPet(this,\\'decisao\\')">Decisoes</button>';
+    h += '<button onclick="filterPet(this,\\'constricao\\')">Constricoes</button>';
+    h += '</div>';
+
+    h += '<div id="petTimeline">';
+    d.timeline.forEach(function(ev) {
+      var colors = { peticao: '#a78bfa', decisao: '#58a6ff', constricao: '#f85149', recurso: '#d29922', intimacao: '#8b949e', documento: '#3fb950', movimento: '#484f58' };
+      var color = colors[ev.tipo] || '#484f58';
+      var autorLabel = ev.autor === 'reclamante' ? 'RECLAMANTE' : (ev.autor === 'reclamado' ? 'RECLAMADO' : 'TRIBUNAL');
+      var autorColor = ev.autor === 'reclamante' ? '#a78bfa' : (ev.autor === 'reclamado' ? '#3fb950' : '#58a6ff');
+      h += '<div class="full-mov" data-tipo="' + ev.tipo + '" style="border-left:3px solid ' + color + '">';
+      h += '<div class="full-mov-date">' + esc(ev.data) + '<br><span style="font-size:.65rem;color:' + autorColor + '">' + autorLabel + '</span></div>';
+      h += '<div><div class="full-mov-desc" style="color:' + color + '">' + esc(ev.titulo) + '</div>';
+      if (ev.detalhes) h += '<div class="full-mov-comp">' + esc(ev.detalhes.substring(0, 200)) + '</div>';
+      h += '<span style="font-size:.65rem;color:#484f58">' + esc(ev.fonte) + '</span>';
+      h += '</div></div>';
+    });
+    h += '</div></div></div>';
+
+    h += '</div>'; // modal-body
+    document.getElementById('modalContent').innerHTML = h;
+  } catch(e) {
+    alert('Erro: ' + e.message);
+    if (btn) { btn.classList.remove('loading'); btn.innerHTML = '&#128220; Peticoes'; }
+  }
+}
+
+function filterPet(el, tipo) {
+  document.querySelectorAll('.full-filter button').forEach(function(b) { b.classList.remove('active'); });
+  el.classList.add('active');
+  document.querySelectorAll('#petTimeline .full-mov').forEach(function(m) {
+    m.style.display = (tipo === 'all' || m.dataset.tipo === tipo) ? '' : 'none';
   });
 }
 
