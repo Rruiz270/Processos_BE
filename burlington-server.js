@@ -968,6 +968,11 @@ app.get('/', (req, res) => {
   res.send(generateDashboardHTML());
 });
 
+// === ASTREA COPY ===
+app.get('/astrea', (req, res) => {
+  res.send(generateAstreaHTML());
+});
+
 // === GENERATE DASHBOARD ===
 function generateDashboardHTML() {
   return `<!DOCTYPE html>
@@ -1246,6 +1251,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0d111
   <a onclick="goTo('sec-prazos')">Prazos</a>
   <a onclick="goTo('sec-update')">DataJud</a>
   <a onclick="goTo('sec-procs')">Tabela</a>
+  <a onclick="window.open('/astrea','_blank')" style="color:#58a6ff;font-weight:600">&#9733; Astrea</a>
   <a onclick="window.open('/api/processos','_blank')">API</a>
 </nav>
 
@@ -2439,6 +2445,743 @@ function toggleText(btn) { var t = btn.nextElementSibling; if (t.style.display =
 // Scroll
 function goTo(id) { document.getElementById(id)?.scrollIntoView({behavior:'smooth',block:'start'}); }
 window.addEventListener('scroll', () => { document.getElementById('btt').classList.toggle('vis', window.scrollY > 400); });
+</script>
+</body>
+</html>`;
+}
+
+// === ASTREA INTERFACE ===
+function generateAstreaHTML() {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Burlington Legal - Astrea</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', 'Roboto', -apple-system, sans-serif; background: #f5f5f5; color: #212121; }
+a { color: #1976d2; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Layout */
+.app-container { display: flex; height: 100vh; overflow: hidden; }
+.sidebar { width: 240px; background: #fff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
+.main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.topbar { height: 64px; background: #fff; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; padding: 0 24px; gap: 16px; }
+.content-area { flex: 1; overflow-y: auto; padding: 24px; }
+
+/* Sidebar */
+.sidebar-logo { padding: 20px; font-size: 18px; font-weight: 600; color: #1976d2; border-bottom: 1px solid #e0e0e0; }
+.sidebar-nav { flex: 1; padding: 8px 0; }
+.nav-item { display: flex; align-items: center; gap: 12px; padding: 12px 20px; cursor: pointer; transition: background .2s; color: #616161; font-size: 14px; }
+.nav-item:hover { background: #f5f5f5; }
+.nav-item.active { background: #e3f2fd; color: #1976d2; font-weight: 500; border-right: 3px solid #1976d2; }
+.nav-icon { font-size: 20px; width: 24px; text-align: center; }
+
+/* Topbar */
+.search-box { flex: 1; max-width: 500px; }
+.search-box input { width: 100%; padding: 8px 16px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 14px; }
+.search-box input:focus { outline: none; border-color: #1976d2; }
+.user-info { display: flex; align-items: center; gap: 8px; color: #757575; font-size: 14px; }
+
+/* Cards */
+.card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.12); margin-bottom: 16px; }
+.card-header { padding: 16px 20px; border-bottom: 1px solid #e0e0e0; font-weight: 600; font-size: 16px; color: #212121; }
+.card-body { padding: 20px; }
+
+/* Filter chips */
+.filter-chips { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.chip { padding: 6px 16px; border-radius: 16px; font-size: 13px; cursor: pointer; transition: all .2s; border: 1px solid #e0e0e0; background: #fff; color: #616161; }
+.chip:hover { background: #f5f5f5; }
+.chip.active { background: #1976d2; color: #fff; border-color: #1976d2; }
+
+/* Table */
+.table-container { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+thead { background: #fafafa; border-bottom: 2px solid #e0e0e0; }
+th { text-align: left; padding: 12px 16px; font-weight: 600; font-size: 13px; color: #616161; text-transform: uppercase; letter-spacing: .5px; }
+td { padding: 12px 16px; border-bottom: 1px solid #f5f5f5; font-size: 14px; }
+tbody tr { cursor: pointer; transition: background .15s; }
+tbody tr:hover { background: #fafafa; }
+
+/* Tags/Badges */
+.tag { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 500; margin-right: 4px; margin-bottom: 4px; }
+.tag-blue { background: #e3f2fd; color: #1565c0; }
+.tag-red { background: #ffebee; color: #c62828; }
+.tag-green { background: #e8f5e9; color: #2e7d32; }
+.tag-orange { background: #fff3e0; color: #e65100; }
+.tag-gray { background: #f5f5f5; color: #616161; }
+
+/* Process detail */
+.process-header { margin-bottom: 24px; }
+.process-title { font-size: 24px; font-weight: 600; margin-bottom: 12px; color: #212121; }
+.process-info-line { font-size: 14px; color: #757575; margin-bottom: 8px; }
+.process-tags { margin-top: 12px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 24px; border-bottom: 2px solid #e0e0e0; margin-bottom: 24px; }
+.tab { padding: 12px 0; cursor: pointer; color: #757575; font-weight: 500; font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all .2s; }
+.tab:hover { color: #212121; }
+.tab.active { color: #1976d2; border-bottom-color: #1976d2; }
+
+/* Detail layout */
+.detail-layout { display: grid; grid-template-columns: 1fr 320px; gap: 24px; }
+.detail-main { display: flex; flex-direction: column; gap: 16px; }
+.detail-sidebar { display: flex; flex-direction: column; gap: 16px; }
+
+/* Info grid */
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.info-item { margin-bottom: 12px; }
+.info-label { font-size: 12px; color: #757575; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; font-weight: 600; }
+.info-value { font-size: 14px; color: #212121; }
+
+/* Timeline */
+.timeline { position: relative; padding-left: 32px; }
+.timeline-item { position: relative; padding-bottom: 24px; }
+.timeline-item::before { content: ''; position: absolute; left: -27px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: #1976d2; border: 2px solid #fff; box-shadow: 0 0 0 2px #e3f2fd; }
+.timeline-item::after { content: ''; position: absolute; left: -23px; top: 16px; bottom: -8px; width: 2px; background: #e0e0e0; }
+.timeline-item:last-child::after { display: none; }
+.timeline-date { font-size: 12px; color: #757575; font-weight: 600; margin-bottom: 4px; }
+.timeline-content { font-size: 14px; color: #212121; line-height: 1.5; }
+
+/* Stats */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.stat-card { background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.stat-value { font-size: 32px; font-weight: 600; color: #212121; margin-bottom: 4px; }
+.stat-label { font-size: 14px; color: #757575; }
+.stat-change { font-size: 12px; margin-top: 8px; }
+.stat-change.positive { color: #2e7d32; }
+.stat-change.negative { color: #c62828; }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 60px 20px; color: #9e9e9e; }
+.empty-state-icon { font-size: 64px; margin-bottom: 16px; }
+.empty-state-text { font-size: 16px; }
+
+/* Loading */
+.loading { text-align: center; padding: 40px; color: #757575; }
+
+/* Alert box */
+.alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }
+.alert-warning { background: #fff3e0; border-left: 4px solid #f57c00; color: #e65100; }
+.alert-danger { background: #ffebee; border-left: 4px solid #d32f2f; color: #c62828; }
+.alert-success { background: #e8f5e9; border-left: 4px solid #388e3c; color: #2e7d32; }
+.alert-info { background: #e3f2fd; border-left: 4px solid #1976d2; color: #1565c0; }
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .detail-layout { grid-template-columns: 1fr; }
+  .detail-sidebar { order: -1; }
+}
+@media (max-width: 768px) {
+  .sidebar { width: 200px; }
+  .info-grid { grid-template-columns: 1fr; }
+}
+
+/* Utilities */
+.hidden { display: none !important; }
+.text-muted { color: #757575; }
+.text-primary { color: #1976d2; }
+.text-danger { color: #c62828; }
+.text-success { color: #2e7d32; }
+.font-weight-bold { font-weight: 600; }
+.mb-0 { margin-bottom: 0; }
+.mt-2 { margin-top: 8px; }
+.mb-2 { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="app-container">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-logo">Burlington Legal</div>
+    <div class="sidebar-nav">
+      <div class="nav-item" onclick="showView('dashboard')">
+        <span class="nav-icon">&#128200;</span>
+        <span>Area de trabalho</span>
+      </div>
+      <div class="nav-item active" onclick="showView('processos')">
+        <span class="nav-icon">&#128194;</span>
+        <span>Processos e casos</span>
+      </div>
+      <div class="nav-item" onclick="showView('publicacoes')">
+        <span class="nav-icon">&#128240;</span>
+        <span>Publicacoes</span>
+      </div>
+      <div class="nav-item" onclick="showView('contatos')">
+        <span class="nav-icon">&#128101;</span>
+        <span>Contatos</span>
+      </div>
+      <div class="nav-item" onclick="showView('indicadores')">
+        <span class="nav-icon">&#128202;</span>
+        <span>Indicadores</span>
+      </div>
+      <div class="nav-item" onclick="showView('alertas')">
+        <span class="nav-icon">&#9888;</span>
+        <span>Alertas</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main content -->
+  <div class="main-content">
+    <!-- Topbar -->
+    <div class="topbar">
+      <div class="search-box">
+        <input type="text" id="globalSearch" placeholder="Buscar processos, partes, numeros..." onkeyup="handleGlobalSearch()">
+      </div>
+      <div class="user-info">
+        <span>&#128100;</span>
+        <span>Christiane Bendini</span>
+      </div>
+    </div>
+
+    <!-- Content area -->
+    <div class="content-area">
+      <!-- Dashboard View -->
+      <div id="view-dashboard" class="view-content hidden">
+        <h2 style="margin-bottom: 24px;">Area de trabalho</h2>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="dash-total">0</div>
+            <div class="stat-label">Total de processos</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="dash-ativos">0</div>
+            <div class="stat-label">Processos ativos</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="dash-risco">0</div>
+            <div class="stat-label">Alto risco</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="dash-valor">R$ 0</div>
+            <div class="stat-label">Valor total causa</div>
+          </div>
+        </div>
+        <div class="card" style="margin-top: 24px;">
+          <div class="card-header">Atividades recentes</div>
+          <div class="card-body">
+            <div id="dash-activities" class="loading">Carregando...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Processos List View -->
+      <div id="view-processos" class="view-content">
+        <div class="filter-chips">
+          <div class="chip active" onclick="filterProcessos('todos')">Todos</div>
+          <div class="chip" onclick="filterProcessos('ativos')">Ativos</div>
+          <div class="chip" onclick="filterProcessos('execucao')">Execucao</div>
+          <div class="chip" onclick="filterProcessos('alto-risco')">Alto Risco</div>
+          <div class="chip" onclick="filterProcessos('ganha')">Causa Ganha</div>
+        </div>
+        <div class="card">
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Processo</th>
+                  <th>Partes</th>
+                  <th>Acao</th>
+                  <th>Juizo</th>
+                  <th>Valor Causa</th>
+                  <th>Status</th>
+                  <th>Tags</th>
+                </tr>
+              </thead>
+              <tbody id="processos-tbody">
+                <tr><td colspan="7" class="loading">Carregando processos...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Process Detail View -->
+      <div id="view-processo-detail" class="view-content hidden">
+        <div class="process-header">
+          <div style="margin-bottom: 12px;">
+            <a href="#" onclick="showView('processos'); return false;" style="color: #1976d2; font-size: 14px;">&#8592; Voltar para lista</a>
+          </div>
+          <h1 class="process-title" id="detail-title">Carregando...</h1>
+          <div class="process-tags" id="detail-tags"></div>
+          <div class="process-info-line" id="detail-info"></div>
+        </div>
+
+        <div class="tabs">
+          <div class="tab active" onclick="switchTab('resumo')">Resumo</div>
+          <div class="tab" onclick="switchTab('atividades')">Atividades</div>
+          <div class="tab" onclick="switchTab('historico')">Historico</div>
+        </div>
+
+        <!-- Tab: Resumo -->
+        <div id="tab-resumo" class="tab-content">
+          <div class="detail-layout">
+            <div class="detail-main">
+              <div class="card">
+                <div class="card-header">Dados do Processo</div>
+                <div class="card-body">
+                  <div class="info-grid" id="detail-dados"></div>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card-header">Estrategia e Recomendacoes</div>
+                <div class="card-body" id="detail-estrategia"></div>
+              </div>
+            </div>
+            <div class="detail-sidebar">
+              <div class="card">
+                <div class="card-header">Proximas atividades</div>
+                <div class="card-body" id="detail-proximas"></div>
+              </div>
+              <div class="card">
+                <div class="card-header">Alertas</div>
+                <div class="card-body" id="detail-alertas"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Atividades -->
+        <div id="tab-atividades" class="tab-content hidden">
+          <div class="card">
+            <div class="card-header">Timeline de atividades</div>
+            <div class="card-body">
+              <div class="timeline" id="detail-timeline"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Historico -->
+        <div id="tab-historico" class="tab-content hidden">
+          <div class="card">
+            <div class="card-header">Historico completo (DataJud + Local)</div>
+            <div class="card-body">
+              <div class="timeline" id="detail-historico-full"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Publicacoes View -->
+      <div id="view-publicacoes" class="view-content hidden">
+        <h2 style="margin-bottom: 24px;">Publicacoes (Comunica PJe)</h2>
+        <div id="publicacoes-list"></div>
+      </div>
+
+      <!-- Contatos View -->
+      <div id="view-contatos" class="view-content hidden">
+        <h2 style="margin-bottom: 24px;">Contatos</h2>
+        <div class="card">
+          <div class="card-body">
+            <div id="contatos-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Indicadores View -->
+      <div id="view-indicadores" class="view-content hidden">
+        <h2 style="margin-bottom: 24px;">Indicadores</h2>
+        <div class="stats-grid" id="indicadores-stats"></div>
+      </div>
+
+      <!-- Alertas View -->
+      <div id="view-alertas" class="view-content hidden">
+        <h2 style="margin-bottom: 24px;">Alertas</h2>
+        <div id="alertas-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Global state
+let allProcessos = [];
+let currentFilter = 'todos';
+let currentProcessoId = null;
+
+// Helpers
+function esc(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function formatCurrency(val) { if (!val) return 'R$ 0,00'; return 'R$ ' + Number(val).toLocaleString('pt-BR', {minimumFractionDigits: 2}); }
+function formatDate(d) { if (!d) return '--'; return new Date(d).toLocaleDateString('pt-BR'); }
+
+// Navigation
+function showView(viewName) {
+  document.querySelectorAll('.view-content').forEach(function(el) { el.classList.add('hidden'); });
+  document.querySelectorAll('.nav-item').forEach(function(el) { el.classList.remove('active'); });
+
+  var viewEl = document.getElementById('view-' + viewName);
+  if (viewEl) viewEl.classList.remove('hidden');
+
+  var navItems = document.querySelectorAll('.nav-item');
+  navItems.forEach(function(item) {
+    if (item.textContent.toLowerCase().includes(viewName === 'processos' ? 'processos' : viewName === 'dashboard' ? 'trabalho' : viewName)) {
+      item.classList.add('active');
+    }
+  });
+
+  if (viewName === 'dashboard') loadDashboard();
+  if (viewName === 'publicacoes') loadPublicacoes();
+  if (viewName === 'contatos') loadContatos();
+  if (viewName === 'indicadores') loadIndicadores();
+  if (viewName === 'alertas') loadAlertas();
+}
+
+// Tab switching
+function switchTab(tabName) {
+  document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.add('hidden'); });
+
+  event.target.classList.add('active');
+  document.getElementById('tab-' + tabName).classList.remove('hidden');
+}
+
+// Load processos
+function loadProcessos() {
+  fetch('/api/status')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      allProcessos = data.processos || [];
+      renderProcessosTable();
+    })
+    .catch(function(e) {
+      document.getElementById('processos-tbody').innerHTML = '<tr><td colspan="7" style="color: #c62828;">Erro ao carregar: ' + esc(e.message) + '</td></tr>';
+    });
+}
+
+function filterProcessos(filter) {
+  currentFilter = filter;
+  document.querySelectorAll('.filter-chips .chip').forEach(function(el) { el.classList.remove('active'); });
+  event.target.classList.add('active');
+  renderProcessosTable();
+}
+
+function renderProcessosTable() {
+  var filtered = allProcessos.filter(function(p) {
+    if (currentFilter === 'todos') return true;
+    if (currentFilter === 'ativos') return (p.status || '').toLowerCase().includes('ativo') || (p.fase || '').toLowerCase().includes('conhecimento');
+    if (currentFilter === 'execucao') return (p.fase || '').toLowerCase().includes('execu');
+    if (currentFilter === 'alto-risco') return (p.risco || '').toLowerCase().includes('alt') || (p.risco || '').toLowerCase().includes('crit');
+    if (currentFilter === 'ganha') return p.causa_ganha_burlington || p.causa_ganha_frramos;
+    return true;
+  });
+
+  var html = '';
+  filtered.forEach(function(p) {
+    var tags = '<span class="tag tag-blue">BURLINGTON ENGLISH LATAM</span>';
+    if (p.envolve_frramos) tags += '<span class="tag tag-red">F R RAMOS</span>';
+    tags += '<span class="tag tag-green">TRABALHISTA</span>';
+
+    var riscoCor = 'gray';
+    var riscoLower = (p.risco || '').toLowerCase();
+    if (riscoLower.includes('crit')) riscoCor = 'red';
+    else if (riscoLower.includes('alt')) riscoCor = 'orange';
+    else if (riscoLower.includes('med')) riscoCor = 'orange';
+
+    html += '<tr onclick="loadProcessoDetail(' + p.id + ')">' +
+      '<td><a href="#" onclick="event.preventDefault(); loadProcessoDetail(' + p.id + ');">' + esc(p.numero) + '</a></td>' +
+      '<td>' + esc(p.reclamante) + '</td>' +
+      '<td>' + esc(p.acao_recomendada || p.fase || '--') + '</td>' +
+      '<td>' + esc(p.vara || '--') + '</td>' +
+      '<td>' + formatCurrency(p.valor_causa) + '</td>' +
+      '<td><span class="tag tag-' + riscoCor + '">' + esc(p.status || 'Em andamento') + '</span></td>' +
+      '<td>' + tags + '</td>' +
+    '</tr>';
+  });
+
+  if (html === '') html = '<tr><td colspan="7" class="empty-state-text">Nenhum processo encontrado</td></tr>';
+  document.getElementById('processos-tbody').innerHTML = html;
+}
+
+// Global search
+function handleGlobalSearch() {
+  var query = document.getElementById('globalSearch').value.toLowerCase();
+  if (query.length < 2) {
+    renderProcessosTable();
+    return;
+  }
+
+  var filtered = allProcessos.filter(function(p) {
+    return (p.numero || '').toLowerCase().includes(query) ||
+           (p.reclamante || '').toLowerCase().includes(query) ||
+           (p.vara || '').toLowerCase().includes(query);
+  });
+
+  allProcessos = filtered;
+  renderProcessosTable();
+}
+
+// Load processo detail
+function loadProcessoDetail(id) {
+  currentProcessoId = id;
+  showView('processo-detail');
+
+  document.getElementById('detail-title').textContent = 'Carregando...';
+  document.getElementById('detail-tags').innerHTML = '';
+  document.getElementById('detail-info').innerHTML = '';
+  document.getElementById('detail-dados').innerHTML = '<div class="loading">Carregando dados...</div>';
+
+  fetch('/api/processo/' + id)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      renderProcessoDetail(data);
+    })
+    .catch(function(e) {
+      document.getElementById('detail-dados').innerHTML = '<div style="color: #c62828;">Erro: ' + esc(e.message) + '</div>';
+    });
+}
+
+function renderProcessoDetail(p) {
+  var title = esc(p.reclamante) + ' X BURLINGTON ENGLISH LATAM';
+  if (p.envolve_frramos) title += ' / F R RAMOS';
+  document.getElementById('detail-title').textContent = title;
+
+  var tags = '<span class="tag tag-blue">BURLINGTON ENGLISH LATAM</span>';
+  if (p.envolve_frramos) tags += '<span class="tag tag-red">F R RAMOS</span>';
+  tags += '<span class="tag tag-green">TRABALHISTA</span>';
+  document.getElementById('detail-tags').innerHTML = tags;
+
+  var info = 'Processo: ' + esc(p.numero) + ' | Cliente: MINDSET INSTITUTE LTDA | Status: ' + esc(p.status || 'Em andamento') + ' | Responsavel: Christiane Bendini';
+  document.getElementById('detail-info').innerHTML = info;
+
+  var dadosHtml = '';
+  dadosHtml += '<div class="info-item"><div class="info-label">Acao</div><div class="info-value">' + esc(p.tipo || '--') + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Objeto</div><div class="info-value">Verbas trabalhistas</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Numero</div><div class="info-value">' + esc(p.numero) + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Juizo</div><div class="info-value">' + esc(p.vara || '--') + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Valor da causa</div><div class="info-value">' + formatCurrency(p.valor_causa) + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Val. condenacao</div><div class="info-value">' + formatCurrency(p.valor_condenacao) + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Distribuido em</div><div class="info-value">' + formatDate(p.data_autuacao) + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Criado em</div><div class="info-value">' + formatDate(p.data_autuacao) + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Fase</div><div class="info-value">' + esc(p.fase || '--') + '</div></div>';
+  dadosHtml += '<div class="info-item"><div class="info-label">Grau</div><div class="info-value">' + esc(p.grau || 'G1') + '</div></div>';
+  document.getElementById('detail-dados').innerHTML = dadosHtml;
+
+  var estrategiaHtml = '';
+  if (p.estrategia && p.estrategia.length > 0) {
+    p.estrategia.forEach(function(est) {
+      var alertClass = 'alert-info';
+      var estLower = est.toLowerCase();
+      if (estLower.includes('urgente') || estLower.includes('bloqueio') || estLower.includes('critica')) alertClass = 'alert-danger';
+      else if (estLower.includes('risco') || estLower.includes('audiencia')) alertClass = 'alert-warning';
+      else if (estLower.includes('positivo') || estLower.includes('ganha') || estLower.includes('excluida')) alertClass = 'alert-success';
+
+      estrategiaHtml += '<div class="alert ' + alertClass + '">' + esc(est) + '</div>';
+    });
+  } else {
+    estrategiaHtml = '<div class="text-muted">Nenhuma recomendacao estrategica no momento.</div>';
+  }
+  document.getElementById('detail-estrategia').innerHTML = estrategiaHtml;
+
+  var proximasHtml = '';
+  if (p.proxima_audiencia) {
+    var audData = typeof p.proxima_audiencia === 'object' ? p.proxima_audiencia.data : p.proxima_audiencia;
+    proximasHtml = '<div class="alert alert-warning"><strong>Audiencia:</strong> ' + esc(audData) + '</div>';
+  } else if (p.prazo_final) {
+    proximasHtml = '<div class="alert alert-info"><strong>Prazo:</strong> ' + formatDate(p.prazo_final) + '<br>' + esc(p.prazo_descricao || '') + '</div>';
+  } else {
+    proximasHtml = '<div class="text-muted">Nenhuma atividade proxima agendada.</div>';
+  }
+  document.getElementById('detail-proximas').innerHTML = proximasHtml;
+
+  var alertasHtml = '';
+  if (p.desconsideracao_pj_burlington) alertasHtml += '<div class="alert alert-danger">Desconsideracao PJ Burlington deferida</div>';
+  if (p.desconsideracao_pj_frramos) alertasHtml += '<div class="alert alert-danger">Desconsideracao PJ F R Ramos deferida</div>';
+  if (p.pedido_bloqueio_conta_pj) alertasHtml += '<div class="alert alert-warning">Pedido de bloqueio bancario PJ</div>';
+  if (p.pedido_bloqueio_conta_socios) alertasHtml += '<div class="alert alert-warning">Pedido de bloqueio bancario socios</div>';
+  if (p.burlington_revel) alertasHtml += '<div class="alert alert-danger">Burlington REVEL</div>';
+  if (alertasHtml === '') alertasHtml = '<div class="text-muted">Nenhum alerta critico.</div>';
+  document.getElementById('detail-alertas').innerHTML = alertasHtml;
+
+  var timelineHtml = '';
+  if (p.comunicacoes && p.comunicacoes.length > 0) {
+    p.comunicacoes.forEach(function(com) {
+      timelineHtml += '<div class="timeline-item">' +
+        '<div class="timeline-date">' + formatDate(com.data) + '</div>' +
+        '<div class="timeline-content"><strong>' + esc(com.tipo) + '</strong><br>' + esc(com.parsed.conteudo_resumido || '') + '</div>' +
+      '</div>';
+    });
+  }
+  if (p.historico_movimentacoes && p.historico_movimentacoes.length > 0) {
+    p.historico_movimentacoes.slice(0, 5).forEach(function(mov) {
+      timelineHtml += '<div class="timeline-item">' +
+        '<div class="timeline-date">' + formatDate(mov.data) + '</div>' +
+        '<div class="timeline-content">' + esc(mov.descricao) + '</div>' +
+      '</div>';
+    });
+  }
+  if (timelineHtml === '') timelineHtml = '<div class="text-muted">Nenhuma atividade registrada.</div>';
+  document.getElementById('detail-timeline').innerHTML = timelineHtml;
+
+  loadHistoricoFull(p.id);
+}
+
+function loadHistoricoFull(id) {
+  document.getElementById('detail-historico-full').innerHTML = '<div class="loading">Carregando historico completo...</div>';
+
+  fetch('/api/processo/' + id + '/full')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var html = '';
+      var allMovs = [];
+
+      if (data.datajud_movimentos && data.datajud_movimentos.length > 0) {
+        data.datajud_movimentos.forEach(function(mov) {
+          allMovs.push({ data: mov.dataHora, desc: mov.nome, fonte: 'DataJud' });
+        });
+      }
+
+      var p = allProcessos.find(function(x) { return x.id === id; });
+      if (p && p.historico_movimentacoes) {
+        p.historico_movimentacoes.forEach(function(mov) {
+          allMovs.push({ data: mov.data, desc: mov.descricao, fonte: 'Local' });
+        });
+      }
+
+      allMovs.sort(function(a, b) {
+        var dateA = new Date(a.data);
+        var dateB = new Date(b.data);
+        return dateB - dateA;
+      });
+
+      allMovs.forEach(function(mov) {
+        html += '<div class="timeline-item">' +
+          '<div class="timeline-date">' + formatDate(mov.data) + ' <span class="text-muted">(' + mov.fonte + ')</span></div>' +
+          '<div class="timeline-content">' + esc(mov.desc) + '</div>' +
+        '</div>';
+      });
+
+      if (html === '') html = '<div class="text-muted">Nenhum historico disponivel.</div>';
+      document.getElementById('detail-historico-full').innerHTML = html;
+    })
+    .catch(function(e) {
+      document.getElementById('detail-historico-full').innerHTML = '<div style="color: #c62828;">Erro: ' + esc(e.message) + '</div>';
+    });
+}
+
+// Dashboard
+function loadDashboard() {
+  var total = allProcessos.length;
+  var ativos = allProcessos.filter(function(p) { return (p.status || '').toLowerCase().includes('ativo'); }).length;
+  var risco = allProcessos.filter(function(p) { return (p.risco || '').toLowerCase().includes('alt') || (p.risco || '').toLowerCase().includes('crit'); }).length;
+  var valorTotal = allProcessos.reduce(function(sum, p) { return sum + (p.valor_causa || 0); }, 0);
+
+  document.getElementById('dash-total').textContent = total;
+  document.getElementById('dash-ativos').textContent = ativos;
+  document.getElementById('dash-risco').textContent = risco;
+  document.getElementById('dash-valor').textContent = formatCurrency(valorTotal);
+
+  var html = '';
+  allProcessos.slice(0, 5).forEach(function(p) {
+    html += '<div style="padding: 8px 0; border-bottom: 1px solid #f5f5f5;">' +
+      '<strong>' + esc(p.numero) + '</strong> - ' + esc(p.reclamante) +
+      '<div class="text-muted" style="font-size: 13px; margin-top: 4px;">' + esc(p.acao_recomendada || p.fase || '--') + '</div>' +
+    '</div>';
+  });
+  document.getElementById('dash-activities').innerHTML = html || '<div class="text-muted">Nenhuma atividade recente.</div>';
+}
+
+// Publicacoes
+function loadPublicacoes() {
+  var html = '';
+  allProcessos.forEach(function(p) {
+    if (p.comunicacoes && p.comunicacoes.length > 0) {
+      p.comunicacoes.forEach(function(com) {
+        html += '<div class="card">' +
+          '<div class="card-body">' +
+            '<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">' +
+              '<strong>' + esc(com.tipo) + '</strong>' +
+              '<span class="text-muted">' + formatDate(com.data) + '</span>' +
+            '</div>' +
+            '<div style="margin-bottom: 8px;">' + esc(p.numero) + ' - ' + esc(p.reclamante) + '</div>' +
+            '<div class="text-muted" style="font-size: 14px;">' + esc(com.parsed.conteudo_resumido || '') + '</div>' +
+          '</div>' +
+        '</div>';
+      });
+    }
+  });
+  if (html === '') html = '<div class="empty-state"><div class="empty-state-icon">&#128240;</div><div class="empty-state-text">Nenhuma publicacao encontrada</div></div>';
+  document.getElementById('publicacoes-list').innerHTML = html;
+}
+
+// Contatos
+function loadContatos() {
+  var contatos = {};
+  allProcessos.forEach(function(p) {
+    if (p.reclamante) {
+      if (!contatos[p.reclamante]) contatos[p.reclamante] = { nome: p.reclamante, processos: [] };
+      contatos[p.reclamante].processos.push(p.numero);
+    }
+    if (p.advogado_reclamante) {
+      if (!contatos[p.advogado_reclamante]) contatos[p.advogado_reclamante] = { nome: p.advogado_reclamante, tipo: 'Advogado', processos: [] };
+      contatos[p.advogado_reclamante].processos.push(p.numero);
+    }
+  });
+
+  var html = '<div class="table-container"><table><thead><tr><th>Nome</th><th>Tipo</th><th>Processos</th></tr></thead><tbody>';
+  Object.values(contatos).forEach(function(c) {
+    html += '<tr>' +
+      '<td>' + esc(c.nome) + '</td>' +
+      '<td>' + (c.tipo || 'Reclamante') + '</td>' +
+      '<td>' + c.processos.length + '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table></div>';
+  document.getElementById('contatos-list').innerHTML = html;
+}
+
+// Indicadores
+function loadIndicadores() {
+  var total = allProcessos.length;
+  var execucao = allProcessos.filter(function(p) { return (p.fase || '').toLowerCase().includes('execu'); }).length;
+  var ganhos = allProcessos.filter(function(p) { return p.causa_ganha_burlington || p.causa_ganha_frramos; }).length;
+  var valorTotal = allProcessos.reduce(function(sum, p) { return sum + (p.valor_causa || 0); }, 0);
+  var valorCond = allProcessos.reduce(function(sum, p) { return sum + (p.valor_condenacao || 0); }, 0);
+
+  var html = '';
+  html += '<div class="stat-card"><div class="stat-value">' + total + '</div><div class="stat-label">Total processos</div></div>';
+  html += '<div class="stat-card"><div class="stat-value">' + execucao + '</div><div class="stat-label">Em execucao</div></div>';
+  html += '<div class="stat-card"><div class="stat-value">' + ganhos + '</div><div class="stat-label">Causas ganhas</div></div>';
+  html += '<div class="stat-card"><div class="stat-value">' + formatCurrency(valorTotal) + '</div><div class="stat-label">Valor total causa</div></div>';
+  html += '<div class="stat-card"><div class="stat-value">' + formatCurrency(valorCond) + '</div><div class="stat-label">Valor condenacao</div></div>';
+
+  document.getElementById('indicadores-stats').innerHTML = html;
+}
+
+// Alertas
+function loadAlertas() {
+  var html = '';
+  allProcessos.forEach(function(p) {
+    var alerts = [];
+    if (p.proxima_audiencia) {
+      var audData = typeof p.proxima_audiencia === 'object' ? p.proxima_audiencia.data : p.proxima_audiencia;
+      alerts.push({ tipo: 'Audiencia agendada', msg: audData, cor: 'danger' });
+    }
+    if (p.desconsideracao_pj_burlington) alerts.push({ tipo: 'Desconsideracao PJ Burlington', msg: 'Patrimonio em risco', cor: 'danger' });
+    if (p.desconsideracao_pj_frramos) alerts.push({ tipo: 'Desconsideracao PJ F R Ramos', msg: 'Patrimonio em risco', cor: 'danger' });
+    if (p.pedido_bloqueio_conta_pj) alerts.push({ tipo: 'Bloqueio bancario PJ', msg: 'Risco SISBAJUD', cor: 'warning' });
+    if (p.burlington_revel) alerts.push({ tipo: 'Burlington REVEL', msg: 'Avaliar acao rescisoria', cor: 'danger' });
+
+    if (alerts.length > 0) {
+      html += '<div class="card">' +
+        '<div class="card-body">' +
+          '<strong>' + esc(p.numero) + '</strong> - ' + esc(p.reclamante) +
+          '<div style="margin-top: 12px;">';
+      alerts.forEach(function(a) {
+        html += '<div class="alert alert-' + a.cor + '"><strong>' + esc(a.tipo) + ':</strong> ' + esc(a.msg) + '</div>';
+      });
+      html += '</div></div></div>';
+    }
+  });
+
+  if (html === '') html = '<div class="empty-state"><div class="empty-state-icon">&#9888;</div><div class="empty-state-text">Nenhum alerta critico no momento</div></div>';
+  document.getElementById('alertas-list').innerHTML = html;
+}
+
+// Init
+loadProcessos();
 </script>
 </body>
 </html>`;
