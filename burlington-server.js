@@ -1117,6 +1117,48 @@ app.get('/api/processo/:id/peticoes', async (req, res) => {
   const decisoes = timeline.filter(t => t.tipo === 'decisao' || t.relevancia === 'critica');
   const constricoes = timeline.filter(t => t.tipo === 'constricao');
 
+  // Correlate each petition with the NEXT court decision/despacho that followed
+  // (the judge's response describes what the petition asked for)
+  const enrichedPeticoes = peticoesReclamante.map(pet => {
+    // Find the next decision/despacho/intimacao AFTER this petition date
+    const petDate = pet.dataHora || pet.data;
+    const nextDecisions = timeline.filter(t =>
+      (t.tipo === 'decisao' || t.tipo === 'intimacao') &&
+      t.fonte === 'ComunicaPJe' &&
+      (t.dataHora || t.data) > petDate
+    );
+    // Get the closest one (last in sorted desc = closest after petition)
+    const resposta = nextDecisions.length > 0 ? nextDecisions[nextDecisions.length - 1] : null;
+
+    // Also find the next DataJud decision after petition
+    const nextDatajudDec = timeline.filter(t =>
+      t.tipo === 'decisao' &&
+      t.fonte === 'DataJud' &&
+      (t.dataHora || t.data) > petDate
+    );
+    const respostaDatajud = nextDatajudDec.length > 0 ? nextDatajudDec[nextDatajudDec.length - 1] : null;
+
+    return {
+      ...pet,
+      resposta_juiz: resposta ? {
+        data: resposta.data,
+        titulo: resposta.titulo,
+        texto: resposta.texto_completo || resposta.detalhes || '',
+        link: resposta.link,
+        requerimentos: resposta.requerimentos_identificados || []
+      } : null,
+      resposta_datajud: respostaDatajud ? {
+        data: respostaDatajud.data,
+        titulo: respostaDatajud.titulo,
+        detalhes: respostaDatajud.detalhes || ''
+      } : null
+    };
+  });
+
+  // PJe consultation link
+  const numLimpo = (p.numero || '').replace(/[^0-9.-]/g, '');
+  const pjeLink = 'https://pje.trt2.jus.br/consultaprocessual/detalhe-processo/' + numLimpo;
+
   res.json({
     processo_id: p.id,
     reclamante: p.reclamante,
@@ -1126,9 +1168,10 @@ app.get('/api/processo/:id/peticoes', async (req, res) => {
     peticoes_reclamante: peticoesReclamante.length,
     decisoes_judiciais: decisoes.length,
     constricoes: constricoes.length,
+    pje_link: pjeLink,
     timeline,
     resumo: {
-      ultimas_peticoes: peticoesReclamante.slice(0, 10),
+      ultimas_peticoes: enrichedPeticoes.slice(0, 20),
       ultimas_decisoes: decisoes.slice(0, 10),
       constricoes_recentes: constricoes.slice(0, 5)
     },
@@ -2484,7 +2527,9 @@ async function openPeticoes(id) {
     h += '<div><h2 style="color:#d2a8ff">&#128220; #' + d.processo_id + ' - ' + esc(d.reclamante) + '</h2>';
     h += '<div style="font-size:.8rem;color:#8b949e;margin-top:4px">' + esc(d.numero) + ' | Adv. Reclamante: ' + esc(String(d.advogado_reclamante || 'N/A')) + '</div>';
     h += '<div style="font-size:.72rem;color:#a78bfa;margin-top:4px">' + d.total_eventos + ' eventos | ' + d.peticoes_reclamante + ' peticoes reclamante | ' + d.decisoes_judiciais + ' decisoes | ' + d.constricoes + ' constricoes</div></div>';
-    h += '<div class="badges"><button class="btn-full" onclick="openModal(' + id + ')">&#8592; Resumo</button>';
+    h += '<div class="badges">';
+    if (d.pje_link) h += '<a href="' + esc(d.pje_link) + '" target="_blank" class="btn-full" style="background:linear-gradient(135deg,#1565c0,#0d47a1);text-decoration:none">&#127760; Consultar PJe</a> ';
+    h += '<button class="btn-full" onclick="openModal(' + id + ')">&#8592; Resumo</button>';
     h += ' <button class="btn-full" onclick="openFullProcess(' + id + ')">&#128269; Full</button>';
     h += ' <button class="modal-close" onclick="closeModal()">&#10005;</button></div></div>';
 
@@ -2498,18 +2543,64 @@ async function openPeticoes(id) {
     h += '<div style="flex:1;min-width:140px;background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.3);border-radius:10px;padding:14px;text-align:center"><div style="font-size:1.5rem;font-weight:700;color:#3fb950">' + d.total_eventos + '</div><div style="font-size:.75rem;color:#8b949e">Total Eventos</div></div>';
     h += '</div>';
 
-    // PETICOES DO RECLAMANTE (HIGHLIGHT)
+    // PETICOES DO RECLAMANTE (CLICKABLE with court response)
     if (d.resumo.ultimas_peticoes.length > 0) {
       h += '<div class="full-section" style="border-color:rgba(139,92,246,.3)"><div class="full-section-hdr" style="background:#1e1533">';
-      h += '<span style="color:#a78bfa">&#128220; PETICOES DO RECLAMANTE (' + d.resumo.ultimas_peticoes.length + ') - O que os advogados do reclamante pediram</span></div>';
+      h += '<span style="color:#a78bfa">&#128220; PETICOES DO RECLAMANTE (' + d.resumo.ultimas_peticoes.length + ') - Clique para ver conteudo</span></div>';
       h += '<div class="full-section-body" style="padding:0">';
-      d.resumo.ultimas_peticoes.forEach(function(ev) {
-        h += '<div class="full-mov" style="border-left:3px solid #8b5cf6;background:rgba(139,92,246,.04)">';
+      d.resumo.ultimas_peticoes.forEach(function(ev, idx) {
+        var hasResp = ev.resposta_juiz || ev.resposta_datajud;
+        h += '<div class="full-mov" style="border-left:3px solid #8b5cf6;background:rgba(139,92,246,.04);cursor:pointer" onclick="toggleNext(this)">';
         h += '<div class="full-mov-date">' + esc(ev.data) + (ev.grau ? '<span class="full-mov-grau">' + esc(ev.grau) + '</span>' : '') + '</div>';
-        h += '<div><div class="full-mov-desc" style="color:#d2a8ff">' + esc(ev.titulo) + '</div>';
+        h += '<div style="flex:1"><div class="full-mov-desc" style="color:#d2a8ff;display:flex;align-items:center;gap:8px">' + esc(ev.titulo);
+        h += ' <span style="background:rgba(139,92,246,.15);color:#a78bfa;padding:2px 8px;border-radius:4px;font-size:.68rem">PETICAO RECLAMANTE</span>';
+        if (hasResp) h += ' <span style="background:rgba(88,166,255,.15);color:#58a6ff;padding:2px 8px;border-radius:4px;font-size:.68rem">&#9660; CLIQUE PARA VER RESPOSTA DO JUIZ</span>';
+        else h += ' <span style="background:rgba(210,153,34,.15);color:#d29922;padding:2px 8px;border-radius:4px;font-size:.68rem">Sem resposta vinculada</span>';
+        h += '</div>';
         if (ev.detalhes) h += '<div class="full-mov-comp">' + esc(ev.detalhes) + '</div>';
-        h += '<div style="margin-top:4px"><span style="background:rgba(139,92,246,.15);color:#a78bfa;padding:2px 8px;border-radius:4px;font-size:.7rem">PETICAO RECLAMANTE</span></div>';
         h += '</div></div>';
+
+        // Expandable content (hidden by default)
+        h += '<div style="display:none;border-left:3px solid #58a6ff;margin:0">';
+        if (ev.resposta_juiz) {
+          h += '<div style="padding:16px 18px;background:rgba(88,166,255,.04);border-bottom:1px solid #21262d">';
+          h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span style="background:#1565c0;color:#fff;padding:3px 10px;border-radius:6px;font-size:.72rem;font-weight:700">RESPOSTA DO JUIZ</span>';
+          h += '<span style="color:#58a6ff;font-size:.82rem;font-weight:600">' + esc(ev.resposta_juiz.data) + '</span>';
+          h += '<span style="color:#8b949e;font-size:.78rem">' + esc(ev.resposta_juiz.titulo) + '</span></div>';
+
+          // Requerimentos identified
+          if (ev.resposta_juiz.requerimentos && ev.resposta_juiz.requerimentos.length > 0) {
+            h += '<div style="background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.25);border-radius:8px;padding:10px 14px;margin-bottom:10px">';
+            h += '<div style="font-size:.72rem;color:#a78bfa;font-weight:700;margin-bottom:6px">&#128270; PEDIDOS DO RECLAMANTE (extraidos da decisao):</div>';
+            ev.resposta_juiz.requerimentos.forEach(function(r) {
+              h += '<div style="font-size:.8rem;color:#d2a8ff;margin-bottom:6px;padding:6px 10px;background:rgba(139,92,246,.06);border-left:3px solid #7c3aed;border-radius:0 6px 6px 0">&#8226; ' + esc(r) + '</div>';
+            });
+            h += '</div>';
+          }
+
+          // Full text of judge response
+          if (ev.resposta_juiz.texto) {
+            h += '<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:14px;font-size:.8rem;color:#c9d1d9;line-height:1.7;max-height:300px;overflow-y:auto;white-space:pre-wrap">' + esc(ev.resposta_juiz.texto) + '</div>';
+          }
+          if (ev.resposta_juiz.link) {
+            h += '<div style="margin-top:8px"><a href="' + esc(ev.resposta_juiz.link) + '" target="_blank" style="color:#58a6ff;font-size:.78rem;text-decoration:none;background:rgba(88,166,255,.1);padding:5px 14px;border-radius:6px;display:inline-block">&#128279; Ver documento completo no PJe</a></div>';
+          }
+          h += '</div>';
+        }
+        if (ev.resposta_datajud && !ev.resposta_juiz) {
+          h += '<div style="padding:14px 18px;background:rgba(88,166,255,.03)">';
+          h += '<div style="font-size:.72rem;color:#58a6ff;font-weight:700;margin-bottom:6px">RESPOSTA (DataJud): ' + esc(ev.resposta_datajud.data) + '</div>';
+          h += '<div style="font-size:.82rem;color:#c9d1d9">' + esc(ev.resposta_datajud.titulo) + '</div>';
+          if (ev.resposta_datajud.detalhes) h += '<div style="font-size:.78rem;color:#8b949e;margin-top:4px">' + esc(ev.resposta_datajud.detalhes) + '</div>';
+          h += '</div>';
+        }
+        if (!ev.resposta_juiz && !ev.resposta_datajud) {
+          h += '<div style="padding:14px 18px;color:#484f58;font-size:.82rem">';
+          h += '&#9888; Nao foi possivel vincular uma resposta judicial a esta peticao automaticamente. ';
+          h += 'Consulte diretamente no <a href="' + esc(d.pje_link || '#') + '" target="_blank" style="color:#58a6ff">PJe</a> para ver o conteudo completo.';
+          h += '</div>';
+        }
+        h += '</div>';
       });
       h += '</div></div>';
     }
