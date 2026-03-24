@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "builds": [{ "src": "burlington-server.js", "use": "@vercel/node" }],
+  "routes": [{ "src": "/(.*)", "dest": "burlington-server.js" }],
+  "crons": [
+    { "path": "/api/cron/atualizar", "schedule": "0 10 * * *" },
+    { "path": "/api/cron/atualizar", "schedule": "0 22 * * *" }
+  ]
+}

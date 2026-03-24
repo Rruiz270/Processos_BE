@@ -1,0 +1,5 @@
+node_modules/
+.env
+*.backup*.json
+relatorio_atualizacao_*.json
+burlington_processos_data_backup_*.json
